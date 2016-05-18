@@ -1,0 +1,21 @@
+#find first available block device (sda or vda likely)
+#TODO: pick a likely non-SAN target if possible
+
+shopt -s nullglob
+
+#The script getinstdisk is common for rh/sles/pkvm/ubuntu, it will write the install_disk into /tmp/install_disk file
+#INCLUDE:#ENV:XCATROOT#/share/xcat/install/scripts/getinstdisk#
+if [ -e "/tmp/install_disk" ]; then
+    instdisk=`cat /tmp/install_disk`
+fi
+
+# Could not determine the install disk for whatever reason,
+# try the default /dev/sda
+if [ -z "$instdisk" ]; then
+    instdisk="/dev/sda"
+fi
+
+echo "part PV.01 --ondisk=$instdisk" >> /tmp/partitioning
+echo "volgroup ibmpkvm_rootvg PV.01" >> /tmp/partitioning	
+
+

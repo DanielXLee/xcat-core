@@ -3,7 +3,6 @@
 #   - Added slash in front of "var" in the NICSTOBRINGUP dhclient section.
 #     Bug reported by Jeff Lang <jrlang@uwyo.edu>.  Thanks, Jeff!
 #
-
 modprobe acpi_cpufreq 2>/dev/null		# on some machines this fails
 modprobe cpufreq_ondemand
 if ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor &>/dev/null; then
@@ -41,10 +40,19 @@ if [ -r /sys/devices/virtual/dmi/id/product_uuid ]; then
 	duid=$duid'";'
 	echo $duid > /var/lib/dhclient/dhclient6.leases
 fi
+
 rpcbind
 rpc.statd
-ssh-keygen -q -t rsa -f /etc/ssh/ssh_host_rsa_key -C '' -N ''
-ssh-keygen -q -t dsa -f /etc/ssh/ssh_host_dsa_key -C '' -N ''
+
+# Try -A available on more current version of ssh-keygen to generate all keys
+ssh-keygen -A 2> /dev/null
+if [ $? -ne 0 ]; then
+	# -A option did not work, must be running on older version of
+	# ssh-keygen, try generating needed keys one at a time
+	ssh-keygen -q -t rsa -f /etc/ssh/ssh_host_rsa_key -C '' -N ''
+	ssh-keygen -q -t dsa -f /etc/ssh/ssh_host_dsa_key -C '' -N ''
+fi
+
 echo 'Protocol 2' >> /etc/ssh/sshd_config
 /usr/sbin/sshd
 mkdir -p /etc/xcat
@@ -59,7 +67,16 @@ echo "Done"
 PUBKEY=`openssl rsa -in /etc/xcat/privkey.pem -pubout 2> /dev/null|grep -v "PUBLIC KEY"`
 PUBKEY=`echo $PUBKEY|sed -e 's/ //g'`
 export PUBKEY
-/sbin/rsyslogd -4
+RSYSLOGD_VERSION=`rsyslogd -v | grep "rsyslogd" | cut -d" " -f2 | cut -d"." -f1`
+# Start rsyslogd and log into a local file specified in /etc/rsyslog.conf
+# Later, once xCAT MN is known, dhclient-script will change 
+# rsyslog.conf file to send log entries to xCAT MN
+if [ $RSYSLOGD_VERSION -ge 8 ]; then
+	# Newer vers of rsyslogd (8 and higher) do not support -c flag anymore
+	/sbin/rsyslogd
+else
+	/sbin/rsyslogd -c4
+fi
 mkdir -p /var/lib/lldpad
 echo 'lldp :' >> /var/lib/lldpad/lldpad.conf
 echo '{' >> /var/lib/lldpad/lldpad.conf
@@ -171,6 +188,7 @@ else
             done
 
 	    echo -n "Acquiring network addresses.."
+            tries=0
             while [ -z "$bootnic" ]; do
 	        for tmp1 in $ALLUP_NICS; do
 	            if ip addr show dev $tmp1|grep -v 'scope link'|grep -v 'dynamic'|grep -v  inet6|grep inet > /dev/null; then
@@ -182,6 +200,10 @@ else
                 fi
                 done
                 sleep 2
+                tries=$(($tries+1))
+                if [ $tries -ge 10 ]; then
+                    break
+                fi
 	    done
             if [ -z "$bootnic" ]; then
                 /bin/bash
@@ -218,21 +240,27 @@ echo -n "Acquired IPv4 address on $bootnic: "
 ip addr show dev $bootnic|grep -v 'scope link'|grep -v 'dynamic'|grep -v  inet6|grep inet|awk '{print $2}'
 ntpd -g -x
 # rv 0 state does not work with the new ntp versions
-#(while ! ntpq -c "rv 0 state"|grep 'state=4' > /dev/null; do sleep 1; done; hwclock --systohc) &
-(while [ "`ntpq -c \"rv 0 offset\" | grep \"offset=\" | awk -F \"=\" '{print $2}' | awk -F \".\" '{print $1}' | sed s/-//`" -ge 1000 ]; do sleep 1; done; hwclock --systohc) &
-IPMI_ERROR=`ipmitool mc info`
-IPMI_RC=$?
+while [ "`ntpq -c \"rv 0 offset\" | grep \"offset=\" | awk -F \"=\" '{print $2}' | awk -F \".\" '{print $1}' | sed s/-//`" -ge 1000 ]; do 
+    sleep 1
+done
+
+if [ -e "/dev/rtc" ]; then
+    hwclock --systohc
+fi
+HOST_ARCH=`uname -m`
+if echo $HOST_ARCH | grep "ppc64"; then
+    modprobe ipmi_powernv
+else
+    modprobe ipmi_si
+fi
+modprobe ipmi_devintf
+
+IPMI_RC=`ipmitool mc info >/dev/null 2>&1; echo $?`
 IPMI_SUPPORT=1
 if [ $IPMI_RC -ne 0 ]; then
     IPMI_SUPPORT=0
 fi
 
-if [ -f "/usr/sbin/dmidecode" ]; then
-    if dmidecode|grep IPMI > /dev/null; then
-        modprobe ipmi_si
-        modprobe ipmi_devintf
-    fi
-fi
 DEVICE=$bootnic
 export DEVICE
 
@@ -240,10 +268,13 @@ if [ "$destiny" != "discover" ]; then #we aren't discoverying, we probably can a
 	/bin/getcert $XCATMASTER:$XCATPORT
 fi
 while :; do
-	if [ -z "$destiny" ]; then
-		destiny=`getdestiny $XCATMASTER:$XCATPORT`
+
+        grepconfigraid=`echo $destiny|grep "configraid"`
+        if [ -z "$destiny" -o -n "$grepconfigraid" ]; then
+                destiny=`getdestiny $XCATMASTER:$XCATPORT`
 	fi
-	destparameter=`echo $destiny|awk -F= '{print $2}'`
+        
+        destparameter=`echo $destiny|cut -d '=' -f 2-`
 	destiny=`echo $destiny|awk -F= '{print $1}'`
         dest=`echo $destiny|awk '{print $1}'` #could probably use bash but oh well
 	if [ "$dest" = "discover" ]; then #skip a query to xCAT when /proc/cmdline will do
@@ -252,14 +283,15 @@ while :; do
 		destiny=''
 		dest=''
 	elif [ "$dest" = shell ]; then
-		echo "Dropping to debug shell, exit to check for further action"
+		echo "Dropping to debug shell, exit to run next destiny"
 		destiny=''
 		dest=''
 		/bin/bash
+		/bin/nextdestiny $XCATMASTER:$XCATPORT         
 	elif [ "$dest" = runcmd ]; then
 		destiny=`/bin/nextdestiny $XCATMASTER:$XCATPORT`
 		dest=`echo $destiny|awk -F= '{print $1}'`
-		$destparameter
+                $destparameter
 	elif [ "$dest" = runimage ]; then
 		destiny=`/bin/nextdestiny $XCATMASTER:$XCATPORT`
 		dest=`echo $destiny|awk -F= '{print $1}'`
@@ -324,3 +356,4 @@ while :; do
 
 	fi
 done
+set +x

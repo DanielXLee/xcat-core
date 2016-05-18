@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # IBM(c) 2007 EPL license http://www.eclipse.org/legal/epl-v10.html
 #####################################################
 #
@@ -58,7 +58,7 @@ echolog()
       if [ "$VERBOSE" = "1"  ]; then
          echo "$msgstr"
       fi
-      if [ "$XCATDEBUGMODE" = "1" ]; then
+      if [ "$XCATDEBUGMODE" = "1" ] || [ "$XCATDEBUGMODE" = "2" ]; then
             msgutil_r  "$MASTER_IP" "$msgtype" "$msgstr" "/var/log/xcat/xcat.log"
       fi
    else
@@ -822,16 +822,22 @@ return_value=0
 # subroutine used to run postscripts
 run_ps () {
  local ret_local=0
- logdir=\"/var/log/xcat\"
- mkdir -p \$logdir
- logfile=\"/var/log/xcat/xcat.log\"
- 
+ mkdir -p "\"/var/log/xcat\""
+ local logfile=\"/var/log/xcat/xcat.log\"
+
  if [ -f \$1 ]; then 
   echo \"\`date\` Running postscript: \$*\" 
-  msgutil_r \$MASTER_IP \"debug\" \"\`date\` Running postscript: \$*\" \"\$logfile\"
-  if [ \"\$XCATDEBUGMODE\" = \"1\" ]; then
-     bash -x ./\$@ 2>&1 | tee -a \$logfile
-     ret_local=\${PIPESTATUS[0]}
+  msgutil_r \"\$MASTER_IP\" \"info\" "\"\`date\` Running postscript: \$*\"" \"\$logfile\"
+  if [ \"\$XCATDEBUGMODE\" = \"1\" ] || [ \"\$XCATDEBUGMODE\" = \"2\" ]; then
+     local compt=\$(file \$1)
+     local reg=\"shell script\"
+     if [[ \"\$compt\" =~ \$reg ]]; then
+        bash -x ./\$@ 2>&1 | tee -a \$logfile | logger -t xcat -p debug
+        ret_local=\${PIPESTATUS[0]}
+     else
+        ./\$@ 2>&1 | tee -a \$logfile | logger -t xcat -p debug
+        ret_local=\${PIPESTATUS[0]}
+     fi
   else
      ./\$@ 2>&1 | tee -a \$logfile
      ret_local=\${PIPESTATUS[0]}
@@ -841,10 +847,10 @@ run_ps () {
      return_value=\$ret_local
   fi
   echo \"Postscript: \$* exited with code \$ret_local\" 
-  msgutil_r \$MASTER_IP \"debug\" \"\`date\` Postscript: \$* exited with code \$ret_local\" \"\$logfile\"
+  msgutil_r \"\$MASTER_IP\" \"info\" "\"\`date\` postscript \$* return with \$ret_local\"" \"\$logfile\"
  else
   echo \"\`date\` Postscript \$1 does NOT exist.\" 
-  msgutil_r \$MASTER_IP \"debug\" \"\`date\` Postscript: \$* exited with code \$ret_local\" \"\$logfile\"
+  msgutil_r \"\$MASTER_IP\" \"info\" "\"\`date\` Postscript \$1 does NOT exist.\"" \"\$logfile\"
   return_value=-1
  fi
 

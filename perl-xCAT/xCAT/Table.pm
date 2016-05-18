@@ -63,6 +63,7 @@ $DBI::dbi_debug=9; # increase the debug output
 
 use strict;
 use Scalar::Util qw/weaken/;
+use xCAT::Utils;
 require xCAT::Schema;
 require xCAT::NodeRange;
 use Text::Balanced qw(extract_bracketed);
@@ -94,24 +95,45 @@ sub dbc_submit {
     $request->{'wantarray'} = wantarray();
     my $clisock;
     my $tries=300;
+    my $retdata;
+    my $err;
     while($tries and !($clisock = IO::Socket::UNIX->new(Peer => $dbsockpath, Type => SOCK_STREAM, Timeout => 120) ) ) {
         #print "waiting for clisock to be available\n";
+        if ($tries % 10 == 0 and $dbworkerpid != 0 and not xCAT::Utils::is_process_exists($dbworkerpid)) {
+            $dbworkerpid = 0;
+            xCAT::MsgUtils->message("S","xcatd: DB access process is down, xcat is running in direct access mode. "
+                                       ."Please restart xcatd to avoid of this error.");
+            return undef;
+        }
         sleep 0.1;
         $tries--;
     }
-    unless ($clisock) {
+    if ( $dbworkerpid !=0 and !$clisock) {
         use Carp qw/cluck/;
         cluck();
     }
-    store_fd($request,$clisock);
+    eval {
+        store_fd($request,$clisock);
+    };
+    if ($@) {
+        $err = $@;
+        xCAT::MsgUtils->message("S","xcatd: Error happend when sending data to DB access process ".$err);
+        return undef;
+    }
     #print $clisock $data;
     my $data="";
     my $lastline="";
-    my $retdata = fd_retrieve($clisock);
+    eval {
+        $retdata = fd_retrieve($clisock);
+    };
+    if ($@) {
+        $err = $@;
+        xCAT::MsgUtils->message("S","xcatd: Error happened when receiving data from DB access process ".$err);
+        return undef;
+    }
     close($clisock);
     if (ref $retdata eq "SCALAR") { #bug detected
         #in the midst of the operation, die like it used to die
-        my $err;
         $$retdata =~ /\*XCATBUGDETECTED\*:(.*):\*XCATBUGDETECTED\*/s;
         $err = $1;
         die $err;
@@ -2225,9 +2247,14 @@ sub getNodeAttribs
 {
     my $self    = shift;
     if ($dbworkerpid) { #TODO: should this be moved outside of the DB worker entirely?  I'm thinking so, but I don't dare do so right now...
-			#the benefit would be the potentially computationally intensive substitution logic would be moved out and less time inside limited
-			#db worker scope
+                        #the benefit would be the potentially computationally intensive substitution logic would be moved out and less time inside limited
+                        #db worker scope
         return dbc_call($self,'getNodeAttribs',@_);
+    }
+
+    if (!defined($self->{dbh})) {
+        xCAT::MsgUtils->message("S","xcatd: DBI is missing, Please check the db access process.");
+        return undef;
     }
     my $node    = shift;
     my @attribs;
@@ -2527,21 +2554,40 @@ sub getNodeAttribs_nosub_returnany
     
   my $attrib;
   my $result;
-    
+  my @hierarchy_attrs;
+  my $hierarchy_field = xCAT::TableUtils->get_site_attribute("hierarchicalattrs");
+  if ($hierarchy_field) {
+      @hierarchy_attrs = split(/,/, $hierarchy_field);
+  }
+
   my $data = $results[0];
   if(defined{$data}) { #if there was some data for the node, loop through and check it 
     foreach $result (@results) {
       foreach $attrib (keys %attribsToDo) {
+        if (defined($result) && defined($result->{$attrib}) && $self->{tabname} ne 'nodelist'
+            && @hierarchy_attrs && grep (/^$attrib$/, @hierarchy_attrs) ) {
+            $result->{$attrib} .= ',+=NEXTRECORD';
+        }
         #check each item in the results to see which attributes were satisfied
         if(defined($result) && defined($result->{$attrib}) && $result->{$attrib} !~ $nextRecordAtEnd) {
           delete $attribsToDo{$attrib};
-        } 
-      }   
+        }
+      }
     }
   }
 
   if((keys (%attribsToDo)) == 0) { #if all of the attributes are satisfied, don't look at the groups
     return @results;
+  }
+
+  if ($self->{tabname} eq 'nodelist') {
+      return @results;
+  }
+
+  # As self->nodelist is a weak reference, if error haddpens, log it.
+  if (!defined($self->{nodelist})) {
+      xCAT::MsgUtils->message("S","xcat Table: Unexpected error, nodelist object is undef.");
+      return undef;
   }
 
   #find the groups for this node
@@ -2551,7 +2597,7 @@ sub getNodeAttribs_nosub_returnany
   unless (defined($nodeghash) && defined($nodeghash->{groups})) {
     return @results;
   }
-    
+
   my @nodegroups = split(/,/, $nodeghash->{groups});
   my $group;
   my @groupResults;
@@ -2574,8 +2620,10 @@ sub getNodeAttribs_nosub_returnany
 #print "looking for attrib $attrib\n";
           if(defined($groupResult->{$attrib})){
             $attribsDone{$attrib} = 0;
-#print "found attArib $attrib = $groupResult->{$attrib}\n";
-#print "and results look like this:  \n".Dumper(\@results)."\n\n\n";
+            # for hierarchy attribute, append attributes from all the node's group
+            if (@hierarchy_attrs && grep (/^$attrib$/, @hierarchy_attrs) ) {
+                $groupResult->{$attrib} .= ',+=NEXTRECORD';
+            }
             foreach $result (@results){ #loop through our existing results to add or modify the value for this attribute
               if(defined($result)) {
                 if(defined($result->{$attrib})) {
@@ -2612,7 +2660,6 @@ sub getNodeAttribs_nosub_returnany
                 }
               }
               else {#no results in the array so far
-#print "pushing for the first time.  attr=$attrib groupResults=$groupResult->{$attrib}\n";
                 $toPush{$attrib} = $groupResult->{$attrib};
                 if($options{withattribution} && $attrib ne $nodekey){
                     $toPush{'!!xcatgroupattribution!!'}->{$attrib} = $group;
@@ -2658,6 +2705,13 @@ sub getNodeAttribs_nosub_returnany
   for $result (@results) {
     for my $key (keys %$result) {
       $result->{$key} =~ s/\+=NEXTRECORD//g;
+      if (@hierarchy_attrs && grep (/^$key$/, @hierarchy_attrs) ) {
+          my @attribs = split(/,/, $result->{$key});
+          my %count;
+          # remove the repeat value
+          @attribs = grep { ++$count{ $_ } < 2; } @attribs;
+          $result->{$key} = join(',', @attribs);
+      }
     }
   }
 
@@ -2699,6 +2753,12 @@ sub getAllEntries
     if ($dbworkerpid) {
         return dbc_call($self,'getAllEntries',@_);
     }
+
+    if (!defined($self->{dbh})) {
+        xCAT::MsgUtils->message("S","xcatd: DBI is missing, Please check the db access process.");
+        return undef;
+    }
+
     my $allentries = shift;
     my @rets;
     my $query;
@@ -2995,13 +3055,18 @@ sub getAllAttribs
     if ($dbworkerpid) {
         return dbc_call($self,'getAllAttribs',@_);
     }
+
+    if (!defined($self->{dbh})) {
+        xCAT::MsgUtils->message("S","xcatd: DBI is missing, Please check the db access process.");
+        return undef;
+    }
     #print "Being asked to dump ".$self->{tabname}."for something\n";
     my @attribs = @_;
     my @results = ();
     if ($self->{_use_cache}) {
         if ($self->{_cachestamp} < (time()-5)) { #NEVER use a cache older than 5 seconds
-		$self->_refresh_cache();
-	}
+            $self->_refresh_cache();
+        }
         my @results;
         my $cacheline;
         CACHELINE: foreach $cacheline (@{$self->{_tablecache}}) {
@@ -3436,10 +3501,12 @@ sub close
     my $self = shift;
     #if ($self->{dbh}) { $self->{dbh}->disconnect(); }
     #undef $self->{dbh};
-    if ($self->{tabname} eq 'nodelist') {
-       undef $self->{nodelist};
-    } else {
-       $self->{nodelist}->close();
+    if ($0 ne "xcatd: DB Access") {
+        if ($self->{tabname} eq 'nodelist') {
+            undef $self->{nodelist};
+        } else {
+            $self->{nodelist}->close();
+        }
     }
 }
 

@@ -299,7 +299,6 @@ unless ($onlyinitrd) {
    my $aptgetcmdby = "DEBIAN_FRONTEND=noninteractive chroot $rootimg_dir apt-get $non_interactive ";
    my $aptcachecmd = "DEBIAN_FRONTEND=noninteractive chroot $rootimg_dir apt-get update && chroot $rootimg_dir apt-cache $non_interactive ";
    my $aptcmd1 = "debootstrap";
-   #my $aptcmd2 = "--arch $uarch $dist $rootimg_dir file://$installroot/$osver/$arch/";
    my $aptcmd2;
 
    # Check whether a local Ubuntu mirror is specified
@@ -427,6 +426,8 @@ unless ($onlyinitrd) {
         if(exists $pkg_hash{$pass}{ENVLIST}){
             $envlist = join(',', @{$pkg_hash{$pass}{ENVLIST}});
         }
+        
+        fake_policy_rc_d();
 
         print "$envlist $aptgetcmdby install $pkgnames\n";
         my $rc = system("$envlist $aptgetcmdby install --allow-unauthenticated $pkgnames");
@@ -450,10 +451,6 @@ unless ($onlyinitrd) {
     
     #add the other package directory to for apt-get install
     open ($aptconfig,">","$rootimg_dir/etc/apt/sources.list.d/genimage.apt.list");
-    #if ($otherpkgsdir_local){
-    #   # print $aptconfig "deb file://$otherpkgsdir_local ./\n";
-    #   print $aptconfig "deb file:///mnt/otherpkgdir/ ./\n";
-    #}
     if ($otherpkgsdir_internet){
         print $aptconfig $otherpkgsdir_internet;
     }
@@ -494,10 +491,8 @@ unless ($onlyinitrd) {
                 #if there is no Packages file in otherpkgsdir local, it will not be added into source list
                 if ($otherpkgsdir_local) 
                 {
-                      my $tmppkg=$otherpkgsdir_local."/".$_."/Packages";
                       my $tmpdir=$otherpkgsdir_local."/".$_;
-                      `ls $tmppkg 2>&1`;
-                      if(!$?)
+                      if (-f $tmpdir . '/Packages' || -f $tmpdir . '/Packages.gz')
                       {
                           print $aptconfig "deb file:///mnt/otherpkgdir/$_ ./\n"
                       }
@@ -579,16 +574,8 @@ unless ($onlyinitrd) {
    if (!$noupdate) {
        # run apt-get upgrade to update any installed debs
        # needed when running genimage again after updating software in repositories
-       #my $aptgetcmd_update = $yumcmd_base . " upgrade  ";
        my $aptgetcmd_update = $aptgetcmd . "&&". $aptgetcmdby . " upgrade  ";
        $rc = system("$aptgetcmd_update");
-#       if ($kernelimage) {
-#           if ($kernelver) {
-#               $kernelimage = "linux-image-".$kernelver;
-#           }
-#           my $aptgetcmd_install = $aptgetcmd . "&&". $aptgetcmdby. " install --no-install-recommends ".$kernelimage;
-#           $rc = system("$aptgetcmd_install");
-#       }
        # ignore any return code
    }
    # Hack uname to get the corrent kernel ver, use the original uname binary
@@ -596,6 +583,7 @@ unless ($onlyinitrd) {
 
    print("Umount /proc, /dev, /sys, pkgdir and otherpkgdir to the rootimg.\n");
    umount_chroot($rootimg_dir);
+
 
    `rm -fr $rootimg_dir/etc/apt/sources.list.d/genimage1.apt.list`;
    
@@ -1534,14 +1522,14 @@ else
    retrytimes=0
    cmd=""
    while [ "\$cmd" != "done" ]; do
-         retrytimes=`expr \$retrytimes + 1`
+         retrytimes=`busybox expr \$retrytimes + 1`
          if [ \$retrytimes -eq 60 ]; then
             break;
          fi
          read -t 60 cmd
          if [ "\$cmd" == "ready" ]; then
-             head -n 1 /tmp/ncarg
-             rm -rf /tmp/ncarg
+             busybox head -n 1 /tmp/ncarg
+             busybox rm -rf /tmp/ncarg
          fi
    done
 
@@ -1625,45 +1613,37 @@ EOMS
         system("cp  $rootimg_dir/lib/modules/$kernelver/modules.order /tmp/xcatinitrd.$$/lib/modules/$kernelver/modules.order");
     }
 
-
-#   if (-d "$rootimg_dir/lib/powerpc64le-linux-gnu/"){
-#      system("cp  -rf $rootimg_dir/lib/powerpc64le-linux-gnu/* /tmp/xcatinitrd.$$/lib/powerpc64le-linux-gnu/");
-#   }
-
     system("chroot /tmp/xcatinitrd.$$/ depmod $kernelver");
-	# Copy udev and network scripts into initrd for s390x, which also works for other platforms
-	# udev
-	system("mkdir -p /tmp/xcatinitrd.$$/etc/udev");
-	system("cp -r $rootimg_dir/etc/udev/* /tmp/xcatinitrd.$$/etc/udev");
-	system("mkdir -p /tmp/xcatinitrd.$$/lib/udev");
-	system("cp -r $rootimg_dir/lib/udev/* /tmp/xcatinitrd.$$/lib/udev");
-	system("mkdir -p /tmp/xcatinitrd.$$/proc/self");
-	system("cp -r /proc/self/oom_adj /tmp/xcatinitrd.$$/proc/self");
-	
-	# Network related scripts
-        #system("echo $kernelver\n");
-	#system("mkdir -p /tmp/xcatinitrd.$$/sbin");
-	#system("cp -r $rootimg_dir/sbin/* /tmp/xcatinitrd.$$/sbin");
-	#system("mkdir -p /tmp/xcatinitrd.$$/lib/modules/$kernelver");
-	#system("cp -r $rootimg_dir/lib/modules/$kernelver/modules.dep /tmp/xcatinitrd.$$/lib/modules/$kernelver/modules.dep");
-	#system("mkdir -p /tmp/xcatinitrd.$$/etc/init.d");
-	#system("cp -r $rootimg_dir/etc/init.d/* /tmp/xcatinitrd.$$/etc/init.d");
-	#system("mkdir -p /tmp/xcatinitrd.$$/lib64");
-	#system("cp -r $rootimg_dir/lib64/* /tmp/xcatinitrd.$$/lib64");
-	#system("mkdir -p /tmp/xcatinitrd.$$/var/run/netreport");
-        symlink("busybox","/tmp/xcatinitrd.$$/bin/pivot_root");
-        symlink("busybox", "/tmp/xcatinitrd.$$/bin/udhcpc");
-        symlink("busybox", "/tmp/xcatinitrd.$$/sbin/ifconfig");
-        symlink("busybox", "/tmp/xcatinitrd.$$/bin/hostname");
-        symlink("busybox", "/tmp/xcatinitrd.$$/bin/route");
-        symlink("busybox", "/tmp/xcatinitrd.$$/bin/nc");
-        symlink("bash", "/tmp/xcatinitrd.$$/bin/sh");
-        symlink("bash", "/tmp/xcatinitrd.$$/sbin/sh");
+    # Copy udev and network scripts into initrd for s390x, which also works for other platforms
+    # udev
+    system("mkdir -p /tmp/xcatinitrd.$$/etc/udev");
+    system("cp -r $rootimg_dir/etc/udev/* /tmp/xcatinitrd.$$/etc/udev");
+    system("mkdir -p /tmp/xcatinitrd.$$/lib/udev");
+    system("cp -r $rootimg_dir/lib/udev/* /tmp/xcatinitrd.$$/lib/udev");
+    system("mkdir -p /tmp/xcatinitrd.$$/proc/self");
+    system("cp -r /proc/self/oom_adj /tmp/xcatinitrd.$$/proc/self");
+    
+    # Network related scripts
+    symlink("busybox","/tmp/xcatinitrd.$$/bin/pivot_root");
+    symlink("busybox", "/tmp/xcatinitrd.$$/bin/udhcpc");
+    symlink("busybox", "/tmp/xcatinitrd.$$/sbin/ifconfig");
+    symlink("busybox", "/tmp/xcatinitrd.$$/bin/hostname");
+    symlink("busybox", "/tmp/xcatinitrd.$$/bin/route");
+    symlink("busybox", "/tmp/xcatinitrd.$$/bin/nc");
+    symlink("bash", "/tmp/xcatinitrd.$$/bin/sh");
+    symlink("bash", "/tmp/xcatinitrd.$$/sbin/sh");
 
-	
-   #copy("$rootimg_dir/lib/modules/*d","/tmp/xcatinitrd.$$/$_");
-   system("cd /tmp/xcatinitrd.$$;find .|cpio -H newc -o|gzip -9 -c - > $destdir/initrd-$mode.gz");
-   system("rm -rf /tmp/xcatinitrd.$$");
+    my $compress="gzip";
+    #if pigz is available,use pigz instead of gzip
+    my $ispigz=system("bash -c 'type -p pigz' >/dev/null 2>&1");
+    if($ispigz == 0){
+       $compress="pigz";
+    }
+
+    #copy("$rootimg_dir/lib/modules/*d","/tmp/xcatinitrd.$$/$_");
+    print "\ncd /tmp/xcatinitrd.$$;find .|cpio -H newc -o|$compress -9 -c - > $destdir/initrd-$mode.gz \n";
+    system("cd /tmp/xcatinitrd.$$;find .|cpio -H newc -o|$compress -9 -c - > $destdir/initrd-$mode.gz");
+    system("rm -rf /tmp/xcatinitrd.$$");
 
 }
 
@@ -1950,26 +1930,71 @@ sub unuse_hackuname {
     }
 }
 
+
+#service management in a chrooted environment make no sense
+#however, the postinstall script of package instllation depends 
+#on it, fake a policy-rc.d to avoid errors during installation
+sub fake_policy_rc_d {
+#POLICY-RC.D   Policy layer (/usr/sbin/policy-rc.d) interface:
+# =============================================================
+# 
+# Most Debian systems will not have this script as the need for a policy layer
+# is not very common. Most people using chroot jails just need an one-line
+# script which returns an exit status of 101 as the jailed
+# /usr/sbin/policy-rc.d script.
+# 
+# The /usr/sbin/policy-rc.d file *must* be managed through the alternatives
+# system (/usr/sbin/update-alternatives) by any packages providing it.
+
+    unless (-e "$rootimg_dir/usr/sbin/policy-rc.d") {
+        my $FAKEFILE;
+        open($FAKEFILE, ">$rootimg_dir/usr/sbin/policy-rc.d");
+        print $FAKEFILE "#!/bin/sh \n";
+        print $FAKEFILE "exit 101\n";
+        close($FAKEFILE);
+        chmod(0755, "$rootimg_dir/usr/sbin/policy-rc.d");
+
+    }
+
+
+}
+
+
+
+
 sub mount_chroot {
    my $rootimage_dir = shift;
    my $otherpkgdir = shift;
    my $pkgdir = shift;
    my $kerneldir = shift;
-   #system("mount -o bind /dev $rootimage_dir/dev");
-   system("mount -o bind /proc $rootimage_dir/proc");
-   #system("mount -o bind /sys $rootimage_dir/sys");
+
+   #postinstall script of package installation
+   #might access the /proc, /sys and /dev filesystem
+   #mount /proc, /sys from host 
+   #create /dev based on /dev/ on host
+   system("mkdir -p $rootimage_dir/proc");
+   system("mount proc $rootimage_dir/proc -t proc");
+   system("mkdir -p $rootimage_dir/sys");
+   system("mount sysfs $rootimage_dir/sys -t sysfs");
+   system("mkdir -p $rootimage_dir/dev");
+   #system("mount devtmpfs $rootimage_dir/dev -t devtmpfs");
+   system("cd /dev;find .|cpio -H newc -o >$rootimage_dir/dev/dev.archive;cd -");
+   system("cd $rootimage_dir/dev;cpio -idum<./dev.archive;rm -f ./dev.archive;cd -");
+
+
    if ($pkgdir) {
        if (-d $pkgdir) {
            mkdir("$rootimage_dir/mnt/pkgdir");
-           system("mount -o bind $pkgdir $rootimage_dir/mnt/pkgdir");
+           system("mount --rbind  $pkgdir $rootimage_dir/mnt/pkgdir; mount -o remount,ro,rbind $pkgdir $rootimage_dir/mnt/pkgdir");
        } else {
            print "The specified pkgdir $pkgdir does not exist!\n"
        }
    }
+
    if ($kerneldir){
       if(-d $kerneldir){
          mkdir("$rootimage_dir/mnt/kerneldir");
-         system("mount --rbind $kerneldir $rootimage_dir/mnt/kerneldir");
+         system("mount --rbind $kerneldir $rootimage_dir/mnt/kerneldir; mount -o remount,ro,rbind $kerneldir $rootimage_dir/mnt/kerneldir");
       }else{
          print "The specified kerneldir $kerneldir does not exist!\n"
       }
@@ -1978,7 +2003,7 @@ sub mount_chroot {
    if ($otherpkgdir){
       mkdir("$rootimage_dir/mnt/otherpkgdir");
       if(-d $otherpkgdir){
-         system("mount --rbind $otherpkgdir $rootimage_dir/mnt/otherpkgdir");
+         system("mount --rbind $otherpkgdir $rootimage_dir/mnt/otherpkgdir; mount -o remount,ro,rbind $otherpkgdir $rootimage_dir/mnt/otherpkgdir");
       }else{
          print "The specified otherpkgdir $otherpkgdir does not exist!\n"
       }
@@ -1987,20 +2012,23 @@ sub mount_chroot {
 
 sub umount_chroot {
    my $rootimage_dir = shift;
-   #system("umount $rootimage_dir/dev");
-   system("umount $rootimage_dir/proc");
-   #system("umount $rootimage_dir/sys");
-   system("umount $rootimage_dir/mnt/pkgdir");
+
+   system("umount -l $rootimage_dir/proc");
+   system("umount -l $rootimage_dir/sys");
+   #system("umount -l $rootimage_dir/dev");
+   system("rm -rf $rootimage_dir/dev/*");
+
+   system("umount -l $rootimage_dir/mnt/pkgdir");
    rmdir("$rootimage_dir/mnt/pkgdir");
-   #system("umount $rootimage_dir/mnt/otherpkgdir");
-   #system("grep /mnt/otherpkgdir /proc/mounts | cut -f2 -d' ' | sort -r|xargs umount");
+
    my @data = `grep /mnt/otherpkgdir /proc/mounts | cut -f2 -d' ' | sort -r`;
    foreach (@data) {
-       `umount $_`;
+       `umount -l $_`;
    }
    rmdir("$rootimage_dir/mnt/otherpkgdir");
+
    if (-d "$rootimage_dir/mnt/kerneldir") {
-       system("umount $rootimage_dir/mnt/kerneldir");
+       system("umount -l $rootimage_dir/mnt/kerneldir");
        rmdir("$rootimage_dir/mnt/kerneldir");
    }
 }

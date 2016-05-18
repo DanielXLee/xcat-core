@@ -81,14 +81,14 @@ if [ -r /sys/devices/virtual/dmi/id/product_name ]; then  #x86
 
 elif [ -r /proc/device-tree/model ]; then #POWER
 	#MTM=`cat /proc/device-tree/model |awk -F, '{print $2}'`
-	MTM=`cat /proc/device-tree/model | sed -e 's/\^.*,//'`
+        MTM=`cat /proc/device-tree/model -vT | sed -e 's/^.*,//' | sed -e 's/^[\t ]*//'| sed -e 's/[\t ]*\^@//'`
         CPUCOUNT=`cat /proc/cpuinfo |grep -e "^cpu\s*:"|wc -l`
         PLATFORM=`cat /proc/cpuinfo | grep -e "^platform\s*:" | awk '{print \$3}'`
         grep -e "^cpu\s*:" /proc/cpuinfo | while read line; do #to avoid pulling in tail, we do a goofy thing
 	    echo $line > /tmp/cpumod
         done
         CPUTYPE=`cat /tmp/cpumod|awk -F':' '{print $2}'|sed -e 's/^ //'`
-        SERIAL=`cat /proc/device-tree/system-id`
+        SERIAL=`cat /proc/device-tree/system-id -vT | sed -e 's/^.*,//' | sed -e 's/^[\t ]*//'| sed -e 's/[\t ]*\^@//'`
         UUID=`sed -e 's/\(..\)\(..\)\(..\)\(..\)-\(..\)\(..\)-\(..\)\(..\)/\4\3\2\1-\6\5-\8\7/' /proc/sys/kernel/random/uuid`
 
 fi
@@ -132,6 +132,15 @@ fi
 if [ "$PLATFORM" != "unknown" ]; then
         echo "<platform>$PLATFORM</platform>" >> /tmp/discopacket
 fi
+
+IsStatic=`ipmitool lan print 1 | grep 'IP Address Source' | grep 'Static'`
+if [ "$IsStatic" ]; then
+    BMCIPADDR=`ipmitool lan print 1 | grep 'IP Address' | grep -v 'IP Address Source' | cut -d ":" -f2 | sed 's/ //'`
+    if [ "$BMCIPADDR" ]; then
+        echo "<bmc>$BMCIPADDR</bmc>" >> /tmp/discopacket
+    fi
+fi
+
 #so we have some cases where DMI table explictly records every function number, and some where only first function is enumerated
 #so for each onboard device, we record it.  If it is also the first function, we'll seek out other function numbers and append
 #if that other function number does not show up in its own dmi type 41 record
